@@ -1,53 +1,128 @@
 package Csv::Reader;
 
-use 5.8;
 use strict;
 use warnings FATAL => 'all';
+use Text::CSV;
+use Csv::Error;
+
+our $VERSION = '1.0.0';
+
+my @rchars = ( "A" .. "Z", "a" .. "z", "0" .. "9" );
+my $rstringlength = 3;
+
+sub get_rstring {
+
+    # Construct random alpha numerical strings for use as lock file salt and
+    # difficult to guess lockfile names.
+    return $rchars[ rand @rchars ] for 1 .. $rstringlength;
+}
+
+sub readrecord
+{
+    my ($c,$csv,$line) = @_;
+    my $status = $csv->parse($line);
+    my @fields;
+    my $error;
+    if ($status) {
+        @fields = $csv->fields();
+    } else {
+        $error = Csv::Error->new($csv);
+    }
+    return ($status , \@fields , $error);
+}
+
+
+
+sub EIQreadrecord {
+    # Try to read a line which has given an 'EIQ - QUO character not allowed'
+    # Error.  The Mantis CSV contains lines with bad quotes for a CSV file eg:
+    # ...,Request,10-06-24,none,,,,public,10-06-25,"lib" directory under SVN,resolved,won\'t fix,,0000000,...
+        #                                                  ^ This is the problem
+    my ($c , $csv , $line , $pos)  = @_;
+    if (UNIVERSAL::isa($line,'Csv::Error')) {
+        my $obj = $line;
+        $line = $obj->get_input(); 
+        $pos ||= $obj->get_position();
+    }
+    my $origline = $line;
+    my $nfound;
+    my $esc = $csv->escape_char();
+    my $qt = $csv->quote_char();
+    my $sep = $csv->sep_char();
+    
+    my $count=99;
+    # Generate a randon string that does not exist in the input line.
+    # Misplaced quotes will be replaced with this then back again after reparsing.
+    my $rep= '::'.&get_rstring().'::';
+    while( ($line =~ /$rep/  || $line=~/$qt/ || $line=~ /$sep/ || $line=~/$esc/) && $count) {
+        --$count;
+        $rep= '::'.&get_rstring().'::';
+    }
+
+    # Get the character before the failure position. 
+    # We expect the problem to be a quote character in a field.  
+    my $char = substr($line,$pos--,1);
+    while($pos > -1 &&  $char ne $sep )
+    {
+        # Get a character.
+        $char = substr($line,$pos,1);
+        # Is it a quote ?
+        if ($char eq $qt) {
+            # Replace the quote with $rep 
+            $char = substr($line,$pos,1,$rep);
+        }
+        --$pos;
+    }
+    # Try reparsing the 
+    my ($status,$fields,$error) = $c->readrecord($csv,$line);
+    if ($fields) {
+        for(my $i=0; $i < @$fields; ++$i ) 
+        {
+            $fields->[$i] =~ s/$rep/$qt/g;
+        }
+    }
+    return ($status,$fields,$error);
+}
+1;
+
 
 =head1 NAME
 
-Csv::Reader - The great new Csv::Reader!
+Csv::Reader - Some utility methods when reading Text::CSV files.
 
 =head1 VERSION
 
-Version 0.01
-
-=cut
-
-our $VERSION = '0.01';
+Version 1.0.0
 
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
+Some utility meathods to make life with Text::CSV easier.
 
-Perhaps a little code snippet.
+    my $csvobj = Text::CSV->new();
+    
+    my Csv::Reader->readrecord($csvobj,$csvline);
+    # Parse the given $csvline parse with the given $csvobject.
 
-    use Csv::Reader;
-
-    my $foo = Csv::Reader->new();
-    ...
-
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
+    my Csv::Reader->EIQreadrecord($csvobj,$csvline,$pos);
+    # Try to fix and reparse a line which fails to parse with an 'EIQ - QUO character not allowed' error.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 Csv::Reader->readrecord($csvobj,$csvline)
 
-=cut
+    Parse the given $csvline with the given $csvobject. That means the headers
+    from the $csvobject are assumed.     Return a Csv::Error object if parsing fails.
 
-sub function1 {
-}
+=head2 Csv::Reader->EIQreadrecord($csvobj,$csvline,$pos)
 
-=head2 function2
+=head2 Csv::Reader->EIQreadrecord($csvobj,$csverr)
 
-=cut
-
-sub function2 {
-}
+    If a previous CSV parsing fails with an 'EIQ - QUO character not allowed' error then
+    this method can be used to try and fix the parsing.  $csvobj must be the parser that failed,
+    $csvline the line the parsing failed on or the returned Csv::Error object.
+    If a line is given the a position for the failure must also be given. 
+    
 
 =head1 AUTHOR
 

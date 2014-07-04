@@ -1,53 +1,188 @@
 package Timestamp;
 
-use 5.8;
+# NOTE: This package is used by Msg to generate timestamps.
+# It cannot therefore use Msg itself
 use strict;
 use warnings FATAL => 'all';
+our $VERSION = 1.0.0;
+
+sub iso8601
+{
+    # Spit out an iso8601 formatted date.
+    my $c = shift;
+    my $rtn;
+    my $t = $c->get_timestamp();
+
+    #    0     1     2      3      4     5      6      7      8
+    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) =
+      gmtime( int($t) );
+    if ( $c->is_timehires_loaded() )
+    {
+        my $usec = int( 1000000 * ( $t - int($t) ) );
+        $rtn = sprintf(
+            '%04d-%02d-%02dT%02d_%02d_%02d.%06d',
+            $year + 1900,
+            $mon + 1, $mday, $hour, $min, $sec, $usec
+        );
+    } else
+    {
+        $rtn = sprintf(
+            '%04d-%02d-%02dT%02d_%02d_%02d',
+            $year + 1900,
+            $mon + 1, $mday, $hour, $min, $sec
+        );
+    }
+    return $rtn;
+}
+
+sub is_timehires_loaded()
+{
+    return exists( $INC{'Time::HiRes'} );
+}
+
+sub set_timestamp
+{
+    # Change the timestamp
+    # Either (time) (seconds,useconds) or (Timestamp_ref))
+    # Parameters, if given, are assumed to be epoch time and millisecond.
+    # Uses current time if no parameters are given.
+    my $s = shift;
+    my $t = shift;
+    if (@_)
+    {
+        # Assume seconds + microseconds
+        my $u = shift;
+        $t = $s->_add_microseconds( $t, $u );
+    } elsif ( ref($t) )
+    {
+        $t = $t->[0];
+    } elsif ( !defined($t) )
+    {
+        $t = $s->get_timenow();
+    }
+    $s->[0] = $t;
+    return $s;
+}
+
+sub _add_microseconds
+{
+    my ( $c, $sec, $usec ) = @_;
+    if ( $usec > 0 ) { $usec /= 1000000; }
+    return int($sec) + $usec;
+}
+
+sub get_timenow()
+{
+    my $c = shift;
+    my $rtn;
+    if ( $c->is_timehires_loaded() )
+    {
+        $rtn
+         = $c->_add_microseconds( ( Time::HiRes::gettimeofday() ) );
+    } else
+    {
+        $rtn = time();
+    }
+    return $rtn;
+}
+
+sub get_timestamp
+{
+    my $c = shift;
+    my $rtn;
+    if ( ref($c) )
+    {
+        $rtn = $c->[0];
+    } else
+    {
+        $rtn = $c->get_timenow();
+    }
+    return $rtn;
+}
+
+sub get_date
+{
+    my $s = shift;
+
+    #    0     1     2      3      4     5      6      7      8
+    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) =
+      gmtime( int( $s->get_timestamp() ) );
+    return ( 1900 + $year, $mon, $mday );
+}
+
+sub get_time
+{
+    my $s = shift;
+    my $t = $s->get_timestamp();
+
+    #    0     1     2      3      4     5      6      7      8
+    my ( $sec, $min, $hour, $mday, $mon, $year, $wday, $yday, $isdst ) =
+      gmtime( int($t) );
+    my $usec = int( 1000000 * ( $t - int($t) ) );
+    return ( $hour, $min, $sec, $usec );
+}
+
+sub new
+{
+    my $c = shift;
+    $c = ( ref $c ) || $c || __PACKAGE__;
+    my $s = bless [], $c;
+    return $s->set_timestamp(@_);
+}
+
+
+sub stringify { return $_[0]->iso8601(); }
+#
+sub numify { return $_[0]->get_timestamp(); }
 
 =head1 NAME
 
-Timestamp - The great new Timestamp!
+Timestamp - A class for creating processing timestamp objects.
 
 =head1 VERSION
 
-Version 0.01
-
-=cut
-
-our $VERSION = '0.01';
-
+Version 1.0.0
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
+Timestamp is focussed on processing time within an application, for example adding
+timestamps to log messages.  Use classes like Date or Date::Calc for user supplied times.
+Timestamp uses overload to return an iso8601 formatted timestamp in string context and
+epoch time in numerical context.
 
-Perhaps a little code snippet.
 
     use Timestamp;
 
+    $Timestamp::UseHiRes = 0 or 1    # Default to seconds (0) or microsecond (1) accuracy.
     my $foo = Timestamp->new();
-    ...
+    # Creates a timestamp object representing current time.
+ 
+     my $foo = Timestamp->new($seconds.useconds);   
+    my $foo = Timestamp->new($seconds, $useconds);
+    # Create a timestamp representing the given number of seconds and microseconds 
+    # and setting for use of Hi resolution or not. 
 
-=head1 EXPORT
+    $foo->set_timestamp($seconds, $useconds);  # Change the time of this timestamp
+    $foo->set_epochtime($seconds);             # Change the epoch time of the timestamp
+    $foo->set_microseconds($microseconds);     # Change the microseconds fraction of the timestamp
+        
+    $epochseconds.useconds = $foo->get_timestamp();       # Get the time.
+    $epochseconds.useconds = Timestamp->get_timestamp();  # Get the time now.
+    $epochseconds = $foo->get_epochtime($seconds);  # Return the epoch time of the timestamp
+    $microseconds = $foo->get_microseconds();       # Return the microseconds time of the timestamp
+    
+    @date = $foo->get_date();   # Return the date portion of the timestamp as a (CCYY,MM,DD) list.
+    @time = $foo->get_time();   # Return the time portion of the timestamp as a (HH,MM,SS,usecs) list.
+    
+    $string = $foo->iso8601();  # Return an ISO8601 formatted date string based on the timestamp.
 
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
+=head SUBROUTINES / METHODS
 
-=head1 SUBROUTINES/METHODS
+=head2 new() or new($seconds.useconds) or new($seconds, $useconds) or new($timestamp_object)
 
-=head2 function1
+Class constructor.  The given time is used.  Where no time is given the current epoch time is used.
+If Time::HiRes has been loaded the a microseconds resolution epoch time will be used.
 
-=cut
-
-sub function1 {
-}
-
-=head2 function2
-
-=cut
-
-sub function2 {
-}
 
 =head1 AUTHOR
 
@@ -137,5 +272,4 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 =cut
-
-1; # End of Timestamp
+1;    # End of Timestamp

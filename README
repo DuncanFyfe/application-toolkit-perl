@@ -1,5 +1,10 @@
 application-toolkit-perl
 
+The Application Toolkit is a collection of perl modules I created to help with 
+some specific applications.  The toolkit are the modules which have wider applicability
+than the original applications and those I keep reaching for when I start another perl 
+job.
+
 The README is used to introduce the module and provide instructions on
 how to install the module, any machine dependencies it may have (for
 example C compilers and installed libraries) and any other information

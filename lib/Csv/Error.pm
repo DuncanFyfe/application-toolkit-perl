@@ -1,53 +1,120 @@
 package Csv::Error;
 
-use 5.8;
 use strict;
 use warnings FATAL => 'all';
+use vars qw($Context);
+
+our $VERSION = '1.0.0'; 
+
+$Context = 3;
+sub new {
+    my $c = shift;
+    $c = ref($c) || $c || __PACKAGE__;
+    my $s = bless {}, $c;
+    $s->init(@_) if @_;
+    return $s;
+}
+
+
+sub init
+{
+        # Generate a nice error to help work out why CSV parsing has failed.
+        my ($s,$csv) = (shift,shift);
+        my @dia = $csv->error_diag();
+        $s->{code} = $dia[0];
+        $s->{msg} = $dia[1];
+        $s->{position} = $dia[2];
+        $s->{input} = $csv->error_input();
+        $s->{status} = $csv->status();
+        
+    my $txt = $s->{error_input};
+        # Generate a highlight of the problem area 
+        my $hlow = $dia[2] - $Context;
+        $hlow = 0 if ($hlow < 0);
+        my $hhigh = $dia[2] + $Context;
+        $hhigh = length($txt -1) if ( $hhigh >= length($txt) );
+        my $diff = $hhigh - $hlow;
+        $s->{highlight} = substr($txt, $hlow , $diff);
+    return $s;
+}
+
+sub get_highlight {
+    return $_[0]->{highlight};
+}
+
+sub get_code() {
+    return $_[0]->{code};
+}
+sub get_msg() {
+    return $_[0]->{msg};
+}
+sub get_position() {
+    return $_[0]->{position};
+}
+sub get_input() {
+    return $_[0]->{input};
+}
+sub get_status() {
+    return $_[0]->{status};
+}
+1;
 
 =head1 NAME
 
-Csv::Error - The great new Csv::Error!
+Csv::Error - Create a useful error object from a Text::CSV parsing failure.
 
 =head1 VERSION
 
-Version 0.01
-
-=cut
-
-our $VERSION = '0.01';
-
+Version 1.0.0
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
+Wrap a Text::CSV error into an error object for use elsewhere. 
 
 Perhaps a little code snippet.
 
     use Csv::Error;
-
-    my $foo = Csv::Error->new();
+    
+    my $txtcsv = Text::CSV->new(...);
+    my $altrecord = '...';
+    my $csverr;
+    my ($status,$fields,$error) = Csv::Reader->readrecord($altrecord);
+    if ($error && $error->get_msg() =~ /EIQ - QUO character not allowed/) {
+        my $quoerr;
+        ($status,$fields,$quoerr) = Csv::Reader->EIQreadrecord($txtcsv, $error);
+    }
     ...
-
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 new($txtcsv)
 
-=cut
+Construct an error object from a Text::CSV object.
 
-sub function1 {
-}
+=head2 get_highlight() 
 
-=head2 function2
+Csv::Error tries to construct a helpful error string for logging with the problem position highlighted.
+This returns that string.
 
-=cut
+=head2 get_code()
 
-sub function2 {
-}
+Get the Text::CSV error code.
+
+#head2 get_msg()
+
+Get the Text::CSV error message.
+
+=head2 get_position()
+
+Get the Text::CSV error position.
+
+=head2 get_input()
+
+Get the input line that caused the Text::CSV error.
+
+=head2 get_status()
+
+Get the Text::CSV status.
 
 =head1 AUTHOR
 

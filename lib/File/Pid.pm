@@ -1,53 +1,113 @@
 package File::Pid;
 
-use 5.8;
 use strict;
 use warnings FATAL => 'all';
-
-=head1 NAME
-
-File::Pid - The great new File::Pid!
-
-=head1 VERSION
-
-Version 0.01
-
-=cut
+use File::Basename;
+use base qw(File::Lock);
 
 our $VERSION = '0.01';
 
+sub take_pidfile() {
+    return $_[0]->lock();
+}
+
+sub try_pidfile() {
+    return $_[0]->trylock();
+}
+
+sub release_pidfile() {
+    return $_[0]->unlock();
+}
+sub _parseargs {
+    my ( $s, $h ) = (@_);
+    my $rtn = {};
+    if ($h) {
+        if ( !ref($h) ) {
+            $rtn->{lockfilename} = $h;
+        }
+        else {
+            foreach my $k (qw(resource lockfilename name pidfilename hostname)) {
+                $rtn->{$k} = $h->{$k};
+            }
+            $rtn->{resource} ||= $rtn->{name};
+            $rtn->{lockfilename} ||= $rtn->{pidfilename};
+        }
+    }
+    $rtn->{lockfilename} ||= File::Basename::basename($0).'.pid';
+    return $rtn;
+}
+
+sub new {
+    my $c = shift;
+    $c = ref($c) || $c || __PACKAGE__;
+    my $args = $c->_parseargs(@_);
+    my $s = bless $c->SUPER::new($args), $c;
+
+    unless ( $s->{hostname} ) {
+        my $hostname;
+        eval { $hostname = Sys::Hostname::hostname(); };
+        my $exc =
+          Exeception->eval_warn( $@, 'Sys::Hostname::hostname() croaked.' );
+        $hostname ||= 'localhost';
+        $s->{hostname} = $hostname;
+    }
+    $s->{filename} ||= File::Basename::basename($0);
+    $s->{lockfilename} ||= $s->make_lockfilename( $s->{filename} );
+    return $s;
+}
+
+
+=head1 NAME
+
+File::Pid - Specialise File::Lock to provide PID files for running processes.  
+=head1 VERSION
+
+Version 1.0.0
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
+Specialise File::Lock module to provide PID files for running processes. These can be used to 
+ensure only one instance of a process (eg. a daemon) is runningat any time.
 
     use File::Pid;
 
-    my $foo = File::Pid->new();
-    ...
+    my $pidfile = File::Pid->new();
+    # Create a default pidfile object.
+    
+    my $pidfile = File::Lock->new({ name => $name, pidfilename => $pidfilename , hostname => $hostname });
+    # Specify all parameters leaving nothing to default.
+    
+    $pidfile->take_pidfile();
+    # Try to get the pid file (uses File::Lock->lock())
+ 
+    $pidfile->try_pidfile();
+    # Try to get the pid file (uses File::Lock->trylock())
+       
+    $pidfile->release_pidfile();
+    # Release the pid file if it is ours (uses File::Lock->unlock())
 
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 new($pidfilename) or new({ name => $name, pidfilename => $pidfilename , hostname => $hostname })
 
-=cut
+The convenience and full object constructors.  When not specified name defaults to File::Basename::basename($0), lockfilename depends on resource and hostname to the system hostname or localhost. 
 
-sub function1 {
-}
+=head2 take_pidfile()
 
-=head2 function2
+An object method which tries to take the pidfile with retries.  See File::Lock::lock
+for more details.
 
-=cut
+=head2 try_pidfile()
 
-sub function2 {
-}
+An object method which tries to take the pidfile with retries.  See File::Lock::lock
+for more details.
+
+=head2 take_pidfile()
+
+An object method which tries to take the pidfile with retries.  See File::Lock::lock
+for more details.
+
 
 =head1 AUTHOR
 

@@ -1,53 +1,449 @@
 package AppConfig;
-
-use 5.8;
 use strict;
 use warnings FATAL => 'all';
+use Msg;
+use Config::IniFiles;
+use Getopt::Long;
+use Storable;
+use File::Basename;
+use File::Spec;
+use FindBin;
+use Exception;
+our $VERSION = '1.00';
+
+# %Opt holds the unprocessed Getopt::Long options.
+use vars qw(@Usage %Opt $DefaultConffilename $Defaultsection $Fallbacksection);
+
+# Default  Section of configuration file to use for default values
+$DefaultConffilename = File::Basename::basename($0) . ".conf";
+$Defaultsection      = 'default';
+$Fallbacksection     = $Defaultsection;
+
+sub get_configoptpaths
+{
+    return $_[0]->{configoptpaths};
+}
+
+sub set_configoptpaths
+{
+    my $s = shift;
+    @{ $s->{configoptpaths} } = (@_);
+}
+sub get_config { my $s = shift; return $s->{config}; }
+
+sub get_configfile
+{
+    return $_[0]->{_read_configfile} || $_[0]->{configfile};
+}
+
+sub set_configfile
+{
+    my $s = shift;
+    $s->{configfile} = shift;
+    return $s;
+}
+
+sub new
+{
+    my ( $c, $h ) = (@_);
+    $c = ref($c) || $c || __PACKAGE__;
+    my $s = bless {
+        usage  => ["Usage: $FindBin::Script"],
+        config => undef,
+        configfile => $DefaultConffilename   # The configuration file with path.
+        ,
+        configoptpaths => [
+          ] # Optional configuration file paths if the configfile isn't found directly.
+        ,
+        default  => $h->{default}  || $Defaultsection,
+        fallback => $h->{fallback} || $Fallbacksection,
+        _defn    => {},
+        _value   => {},
+        _optlong => [],
+        _getcommandline     => 0,
+        _read_configfile    => undef,
+        _resolve_priorities => 0
+    }, $c;
+    return $s;
+}
+
+sub make_commandline
+{
+# $obj->makecommandline(%defn);
+# %defn = (
+#    optionname => { t => '' , d=> [] , m => '' , u => ''}
+#    -description => []
+# )
+# optioname => --optionname
+# t == GetOpt::Long type eg. =s@
+# d == default value
+# m == a modifier to call with the value (a subref or a name)
+# u == usage message
+# c == Configuration section this parameter can be read from.  If c is undefined then this option will not be read from the configuration file.
+# -description => an array ref of text lines added to the usage message.
+    my ( $s, %defn ) = (@_);
+
+    # Extract a descption record
+    my $disc = delete $defn{-description} || [];
+    push @{ $s->{usage} }, @{$disc};
+
+    # Extra options added as a matter of course.
+    $defn{help} ||= { t => '|usage', d => 0, u => 'Print usage information.' };
+
+    # %tmp will collect the length of usage strings so we can format them nicely
+    my %length;
+    my %opt;
+    my %cline;
+    my %cfile;
+    my %usage;
+    my @opt;
+    my $maxlen = 0;
+    foreach my $k ( sort keys %defn )
+    {
+        $opt{$k}   = undef;
+        $cline{$k} = undef;
+        $cfile{$k} = undef;
+        push( @opt, $k . $defn{$k}{t} );
+        $length{$k} = length($k) + length( $defn{$k}{t} );
+        $maxlen = $length{$k} if ( $length{$k} > $maxlen );
+        $usage{$k} = '    --' . $k . $defn{$k}{t} . '__SPACE__' . $defn{$k}{u};
+    }
+    $s->{_value}       = \%opt;
+    $s->{_commandline} = \%cline;
+    $s->{_configfile}  = \%cfile;
+    $s->{_optlong}     = \@opt;
+    $s->{_defn}        = Storable::dclone( {%defn} );
+    foreach my $k ( sort keys %usage )
+    {
+        my $nspc = $maxlen - $length{$k} + 4;
+        my $spc  = ' ' x $nspc;
+        $usage{$k} =~ s/__SPACE__/$spc/;
+        push( @{ $s->{usage} }, $usage{$k} );
+    }
+}
+
+sub _processinput
+{
+    my ( $s, $source, %args ) = @_;
+    my $vals = $s->{$source};
+    foreach my $k ( sort( keys( %{$vals} ) ) )
+    {
+        if ( exists( $args{$k} ) )
+        {
+            $vals->{$k} = $args{$k};
+        }
+    }
+}
+
+sub _read_commandline
+{
+    my $s = shift;
+    if ( !$s->{_getcommandline} )
+    {
+        GetOptions( \%Opt, @{ $s->{_optlong} } );
+        $s->_processinput( '_commandline', %Opt );
+        $s->{_getcommandline} = 1;
+    }
+    if ( $Opt{help} )
+    {
+        $s->usage();
+    }
+    return $s;
+}
+
+sub _find_configfile
+{
+    my $s = shift;
+    my $rtn;
+    my $fname = $s->{_commandline}{configfile} || $s->{configfile};
+    if ( -f $fname )
+    {
+        $rtn = $fname;
+    } else
+    {
+        my $basename = File::Basename::basename($fname);
+        foreach my $dirname ( @{ $s->{configoptpaths} } )
+        {
+            my $fname = File::Spec->catfile( $dirname, $basename );
+            if ( -f $fname )
+            {
+                $rtn = $fname;
+                last;
+            }
+        }
+    }
+    return $rtn;
+}
+
+sub _read_configfile
+{
+    my $s     = shift;
+    my $fname = $s->_find_configfile();
+    if ( !$s->{_read_configfile} && $fname )
+    {
+        $s->{_read_configfile} = $fname;
+        my %h;
+        my %later;
+        my $section = $s->{default};
+
+        # Only supply default and fallback options if they have been specified.
+        my %c;
+        foreach my $k (qw(default fallback))
+        {
+            if ( $s->{$k} )
+            {
+                $c{"-$k"} = $s->{$k};
+            }
+        }
+        my $config = Config::IniFiles->new(
+            -file   => $fname,
+            -nocase => 1,
+            %c
+        );
+        if ( !$config )
+        {
+            Exception->error(
+                {
+                    status => 'Config::IniFiles',
+                    text   => [@Config::IniFiles::errors],
+                    object => \%c
+                }
+            );
+        }
+        $s->{config} = $config;
+        foreach my $k ( keys %{ $s->{_defn} } )
+        {
+            my $ckey = $s->{_defn}{$k}{c};
+            if ( defined($ckey)
+                && $config->SectionExists($ckey) )
+            {
+                my $islist =
+                  $s->{_defn}{$k}{t} && ( $s->{_defn}{$k}{t} =~ /\@/ );
+                if ($islist)
+                {
+                    $h{$k} = [ $config->val( $ckey, $k ) ];
+                } else
+                {
+                    $h{$k} = $config->val( $ckey, $k );
+                }
+            }
+        }
+        $s->_processinput( '_configfile', %h );
+    }
+    return $s;
+}
+
+sub _resolve_priorities
+{
+    my $s = shift;
+    if ( !$s->{_resolve_priorities} )
+    {
+        my $vals = $s->{_value};
+        my $cl   = $s->{_commandline};
+        my $cf   = $s->{_configfile};
+        foreach my $k ( sort( keys( %{$vals} ) ) )
+        {
+            my $clv     = $cl->{$k};
+            my $cfv     = $cf->{$k};
+            my $def     = $s->{_defn}{$k}{d};
+            my $ckey    = $s->{_defn}{$k}{c};
+            my $mod     = $s->{_defn}{$k}{m};
+            my $isarray = $s->{defn}{$k}{t} && $s->{defn}{$k}{t} =~ /\@/;
+            if ($clv)
+            {
+                $vals->{$k} = $clv;
+            } elsif ($ckey)
+            {
+                $vals->{$k} = $cfv;
+            } else
+            {
+                $vals->{$k} = $def;
+            }
+            if ($mod)
+            {
+                no strict;
+                my $v;
+                eval { $v = $mod->( $vals->{$k} ); };
+                my $w = Exception->eval_warn( $!,
+                    "Calling $mod to process configuration option $k failed." );
+                unless ($w)
+                {
+                    $vals->{$k} = $v;
+                }
+            }
+            if ($ckey)
+            {
+                $s->{config}->setval( $ckey, $k, $vals->{$k} );
+            }
+        }
+        $s->{_resolve_priorities} = 1;
+        delete $s->{_commandline};
+        delete $s->{_configfile};
+    }
+}
+
+sub get_configvalue
+{
+    my ( $s, $sect, $name, $default ) = @_;
+    my $config = $s->{config};
+    if ($config->SectionExists($sect)) {
+        my $isarray = exists( $s->{_defn}{$name} ) 
+        && $s->{_defn}{$name}{t} =~ /\@/
+        && $s->{_defn}{$name}{c}
+        && ( $s->{_defn}{$name}{c} eq $sect || $s->{_defn}{$name}{c} eq $Defaultsection );
+        
+        if ($isarray) {
+            return [ $config->val($sect,$name,$default) ];
+            
+        } else {
+            return $config->val($sect,$name,$default) ;
+        }
+        
+    } else {
+        Exception->error('BADCONFIG','Requested configuration section does not exists: ' , $sect);
+    }
+}
+
+sub get_options
+{
+    my $s = shift;
+    $s->_read_commandline();
+    $s->_read_configfile();
+    $s->_resolve_priorities();
+    my $h = Storable::dclone( $s->{_value} );
+    return %$h;
+}
+
+sub resplitlist
+{
+    my @args;
+    foreach my $arg (@_)
+    {
+        push @args, ref($arg) ? @$arg : $arg;
+    }
+    my @rtn = split /[\],\s]/, join( ']', @args );
+    my $w = wantarray;
+    if ($w)
+    {
+        return @rtn;
+    } elsif ( defined($w) )
+    {
+        return \@rtn;
+    }
+}
+
+sub usage
+{
+    my $s = shift;
+    Msg->usage( @{ $s->{usage} } );
+    Msg->usage( '@ARGV => ', @ARGV, '<= @ARGV' );
+    Msg->usage(@_);
+    exit(1);
+}
+1;
 
 =head1 NAME
 
-AppConfig - The great new AppConfig!
+AppConfig - A module which allows command line and configuration file options ]to be defined in a consistent way. 
 
 =head1 VERSION
 
-Version 0.01
-
-=cut
-
-our $VERSION = '0.01';
-
+Version 1.0.0
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
+A module which brings together Getopt::Long and Config::IniFiles to provide 
+common command line and configuration file definition and handling.
 
     use AppConfig;
-
+    
+    
+    my %defn = (
+        optionname1 => { t => '=s@' , d=> [] , m => Magic , u => 'A list of values', c => ''},
+        optionname2 => { t => '=i' , d=> 7 , m => '' , u => 'An integer value', c => 'Numbers'},
+        optionname3 => { t => '|opt3' , d=> 0 , m => '' , u => 'A boolean option', c => ''}
+        -description = [ ' A brief description ' , 'of the application' ]
+    );
+    my $configfile ='/an/ini/file';
     my $foo = AppConfig->new();
-    ...
+    $foo->make_commandline(%defn);
+    $foo->setconfigoptpaths('path1','path2'...)
+    $foo->set_configfile($file);
+    my %config = $foo->get_options();
+    
+    if ($config{help}) {
+        AppConfig->usage();
+    }
 
-=head1 EXPORT
+= head1 DETAIL
 
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
+AppConfig unifies the command line and configuration file definition into a single hash
+and provides the methods necessary to read configuration files then override the
+options with command line values and return the whole thing in a single hash.
+
+It also allows input values to be specified as using a modifier (eg for parsing or validation)
+supplied as a subref or named routine.
+
+The defining hash specifies the command line and the value we expect to get from the configuration file.
+It also allows an application description to be supplied using the '-description key'.
+
+The definition hash keys are:
+    optioname becomes --optionname on the command line. 
+    t => T sets the type of optionname using GetOpt::Long types eg. =s@.
+    d => D sets a default value for this type if none is given.
+    m => M sets a modifier (subref or name) which I<if> present has the value passed to it and the return value assigned to this key.
+    u => U sets a brief usage message.
+    c == Configuration section this parameter can be read from.  If c is undefined then this option will not be read from the configuration file.  If it is defined then that section will be searched for a value given by the I<optioname>.
+
+AppConfig gives special treatment to the option I<configfile>.  If it is defined and the appears on the command line 
+then that file and only that file will be read as the configuration file.  If it is not specified then the
+default configuration file is looked for either where specified then along the paths specified.  
+
+AppConfig constructs a usage method from the -description and options -u values.
+Calling AppConfig->usage() causes this message to be written to Msg and the application to exit.  
+
+NOTE: AppConfig uses Getop::Long to parse the command line options.  Getopt::Long and perhaps other modules
+eat @ARGV as they process it so take care if you want to combine AppConfig and other command line processing.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 new() | new (%defn)
 
-=cut
+Construct a new AppConfig object.  Calling it with a defining hash is the same as calling
+new() followed by make_commandline(%defn) on the returned object.
 
-sub function1 {
-}
+=head2 make_commandline(%defn)
 
-=head2 function2
+Build an command line using the provided definition.
 
-=cut
+=head2 setconfigoptpaths('path1','path2'...)
 
-sub function2 {
-}
+Set alternative locations for the configuration file.  These are checked in order
+if the configuration file is not found at the specified location
+
+=head2 set_configfile('/path/filename')
+
+Set the configuration file to read.
+
+=head2 get_configvalue($section,$name,$default)
+
+Retrieve the configuration option value for the given section and name.
+If the option was declared part of the command line then command line supplied 
+values will override those in the configuration file.
+
+=head2 get_options()
+
+Read the command line and configuration file.  Command line values override 
+configuration options where both are specified.
+
+=head2 get_config()
+
+Get the configuration object so you can get access to the rest of the configuration file.
+
+
+=head2 usage()
+
+Write out an application usage method and exit.
 
 =head1 AUTHOR
 
@@ -137,5 +533,4 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 
 =cut
-
-1; # End of AppConfig
+1;    # End of AppConfig

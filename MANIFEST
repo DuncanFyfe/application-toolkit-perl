@@ -7,13 +7,12 @@ lib/Daemonize.pm
 lib/Date.pm
 lib/Exception.pm
 lib/Exec.pm
-lib/File/Finder.pm
+lib/File/Compression.pm
 lib/File/Lock.pm
 lib/File/Pid.pm
 lib/File/Util.pm
+lib/File/Serial.pm
 lib/Msg.pm
-lib/Msg/Parser.pm
-lib/Serial.pm
 lib/Timestamp.pm
 Makefile.PL
 MANIFEST			This list of files

@@ -1,53 +1,99 @@
 package File::Util;
 
-use 5.8;
 use strict;
 use warnings FATAL => 'all';
+our $VERSION = '1.0.0';
+use Exec;
+use vars qw($MAX_COMMAND_LENGTH);
+$MAX_COMMAND_LENGTH=32768;
+
+# Some commands like cp and mv can bomb out if the command length is too long. 
+# In cases where the command may be too long here are some 'big' alternatives.
+# Here the command is borken down into command lines of at most $MAX_COMMAND_LENGTH
+# characters.
+# eg. moving large product sub-sets from an intermediate to the final directory.
+
+sub big_action
+{
+    my ($c,$act,@p) = @_;
+
+    my $to = pop @p;
+    my $cmdln = 0;
+    # max length adjusted for the command and the destination.
+    my $max = $MAX_COMMAND_LENGTH - length($act) - length($to) -1;
+    my $num=0;
+    while (@p)
+    {
+        my $cmdln = 0;
+        my @cmd  = ($act);
+        while (@p && $cmdln < $max)
+        {
+            my $src = shift(@p);
+                        # Test for empty and undefined entries
+            if ($src) {
+                push @cmd, shift(@p);
+                $cmdln += length($src);
+                ++$cmdln; # add space length
+            }            
+        }
+        # We may have had a list of undefineds
+        if ($cmdln > 0) {
+            push @cmd, $to;
+            Exec->system(@cmd);
+            ++$num;
+        }
+    }
+
+    # Return the number of commands actually executed.
+    return $num;
+}
+
+sub bigmv
+{
+    my $c = shift;
+    return $c->big_action('mv', '-f',@_);
+}
+
+sub bigcp
+{
+    my $c = shift;
+    return $c->big_action('cp' , '-f',@_);
+}
 
 =head1 NAME
 
-File::Util - The great new File::Util!
+File::Util - Utility methods for handling files.
 
 =head1 VERSION
 
-Version 0.01
-
-=cut
-
-our $VERSION = '0.01';
-
+Version 1.0.0
 
 =head1 SYNOPSIS
 
-Quick summary of what the module does.
-
-Perhaps a little code snippet.
+File::Util provides common class utility methods I have used when handling files.
 
     use File::Util;
 
-    my $foo = File::Util->new();
-    ...
+    #Principal methods:
+    File::Util->bigmv(@filelist,$destination);
+    # Move the given files and directories to the destination.
+    
+    File::Util->bigcp(@filelist,$destination);
+    # Copy a large number of files to the destination.
 
-=head1 EXPORT
-
-A list of functions that can be exported.  You can delete this section
-if you don't export anything, such as for a purely object-oriented module.
 
 =head1 SUBROUTINES/METHODS
 
-=head2 function1
+=head2 bigmv(@filelist,$destination), bigcp(@filelist,$destination)
 
-=cut
+Some commands like cp and mv can bomb out if the command length is too long eg.
+eg. moving large product sub-sets from an intermediate to the final directory. 
+In cases where the command may be too long, bigmv and bigcp provide 'big' alternatives.
+The copy or move is borken down into commands of at most $File::UtilMAX_COMMAND_LENGTH
+characters.
 
-sub function1 {
-}
-
-=head2 function2
-
-=cut
-
-sub function2 {
-}
+The system command is used to execute the individual copy and move commands 
+An exception is raised if any of the individual commands fails.
 
 =head1 AUTHOR
 
@@ -138,4 +184,5 @@ EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 =cut
 
-1; # End of File::Util
+1;    # End of Util
+
