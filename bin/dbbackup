@@ -1,0 +1,550 @@
+#!/usr/bin/perl
+# Author: DuncanFyfe
+# Contact: duncanfyfe@domenlas.com
+# Copyright: GPL-2
+# Issued: 2014-06-16
+use strict;
+use version 0.77;
+use FindBin qw($RealBin);
+use lib "$FindBin::RealBin/../lib";
+use Msg;
+$Msg::MinLoglevel = 'info';
+$Msg::LogtoStdErr = 1;
+use File::Lock;
+use File::Pid;
+use AppConfig;
+use Timestamp;
+use Exec;
+use Exception;
+use File::Basename qw();
+use File::Spec qw();
+use File::Path qw();
+use Fcntl qw(:DEFAULT :flock);
+use vars qw($Defaultsection $Defaultchoice);
+$Defaultsection = 'default';
+$Defaultchoice  = 'default';
+
+Msg->new();
+
+my %appConfig = (
+    'sections' => {
+        t => '=s@',
+        d => [],
+        m => 'AppConfig::resplitlist',
+        u => 'Sections of the configuration file to process.',
+        c => $Defaultsection
+    },
+    'choice' => {
+        t => '=s',
+        d => $Defaultchoice,
+        u => 'Identify type of backup eg. daily or weekly .',
+        c => $Defaultsection
+    },
+    'configfile' => {
+        t => '=s',
+        d => undef,
+        u => 'Use this configuration file rather than the default.'
+    },
+);
+my $config = AppConfig->new(
+    {
+        default  => $Defaultsection,
+        fallback => $Defaultsection
+    }
+);
+$config->make_commandline(%appConfig);
+$config->set_configoptpaths( '/etc', $RealBin, $ENV{HOME} );
+my %opt = $config->get_options();
+use vars qw($Version);
+$Version = version->declare(2.0.0);
+
+sub safecommand
+{
+    # Try to replace passwords with safe text when logging commands.
+    my $cmd = shift;
+    while ( $cmd =~ /password=(\S*)/i )
+    {
+        my $p = $1 ? '#password' : '#empty';
+        $cmd =~ s/password=(\S*)/password=$p/i;
+    }
+    return $cmd;
+}
+
+sub mysqlgetdblist
+{
+    # Use the mysql "SHOW DATABASES" command to get what we need.
+    # $h is a hash of DB command line necessaries (eg. password).
+    # $ex is an arrayref to a list of schema to exclude from the returned list.
+    # $ex defaults to [ 'information_schema' ]
+    my $cmd = shift;
+    my @rtn;
+    my $out;
+    eval { $out = Exec->run($cmd); };
+    unless (
+        Exception->eval_warn(
+            $@, 'Unable to retrieve list of databases from mysql.'
+        )
+      )
+    {
+        # Get rid of Database header line.
+        shift @$out;
+
+        # Eliminate leading/trailing whites space and
+        map { s/^\s+|\s+$//g; } @$out;
+        @rtn = grep { $_ } @$out;
+    }
+    return @rtn;
+}
+
+sub psqlgetdblist
+{
+    # Get a list of postgresql databases to be backed up.
+    # Needs a suitable postgresql username and the target database host.
+    # This relies on the PGPASSFILE environment variable being set and
+    # pointing to a suitable pgpass file.
+    my $cmd = shift;
+    my @rtn;
+    my $out;
+    eval { $out = Exec->run($cmd); };
+    unless (
+        Exception->eval_warn(
+            $@, 'Unable to retrieve list of databases from mysql.'
+        )
+      )
+    {
+        # Eliminate leading/trailing whites space and
+        map { s/^\s+|\s+$//g; } @$out;
+        @rtn = grep { $_ } @$out;
+    }
+    return @rtn;
+}
+
+sub sqlbackup
+{
+    my ( $config, $sect, $timestamp, $choice, @databases ) = @_;
+    Msg->debug( 'sect=',      $sect );
+    Msg->debug( 'timestamp=', $timestamp->iso8601() );
+    Msg->debug( 'choice=',    $choice );
+    Msg->debug( '(initial) databases=', \@databases );
+    my $dumpdir = $config->get_configvalue( $sect, 'dumpdir', $ENV{PWD} );
+    my $lockdir = $config->get_configvalue( $sect, 'lockdir', $dumpdir );
+    my $logdir  = $config->get_configvalue( $sect, 'logdir',  $dumpdir );
+    my $dbtype = $config->get_configvalue( $sect, 'dbtype' );
+    Msg->debug( 'dbtype=',  $dbtype );
+    Msg->debug( 'dumpdir=', $dumpdir );
+    Msg->debug( 'lockdir=', $lockdir );
+    Msg->debug( 'logdir=',  $logdir );
+    my $host = $config->get_configvalue( $sect, 'host' );
+    my $port = $config->get_configvalue( $sect, 'port' );
+    my $user = $config->get_configvalue( $sect, 'user' );
+    Msg->debug( 'host=', $host );
+    Msg->debug( 'port=', $port );
+    Msg->debug( 'user=', $user );
+
+
+    unless (@databases)
+    {   
+        my $db = $config->get_configvalue( $sect, 'databases') || [];     
+        @databases = @$db;
+    }
+    my $logstring =
+      sprintf( 'dbtype=%s host=%s port=%s choice=%s timestamp=%s', $dbtype, $host, $port, $choice, $timestamp->iso8601() );
+    Msg->info("### START: BACKUP $logstring\n");
+    my $outputtodir = undef;
+    my $dumpcmd;
+    my $dblistcmd;
+
+    # If the user did not supply a list of databases, make our own.
+    if ( $dbtype =~ /mysql/i )
+    {
+        my $password = $config->get_configvalue( $sect, 'password', undef );
+        $outputtodir = 0;
+        my $idstring =
+          $port
+          ? sprintf( "--user=%s --password=%s --host=%s --port=%d",
+            $user, $password, $host, $port )
+          : sprintf( "--user=%s --password=%s --host=%s",
+            $user, $password, $host );
+        $dumpcmd = sprintf( "mysqldump --opt ", $idstring );
+        $dblistcmd = sprintf( "echo SHOW DATABASES | mysql %s", $idstring );
+        unless (@databases)
+        {
+            @databases = &mysqlgetdblist($dblistcmd);
+        }
+    } elsif ( $dbtype =~ /psql|postgres/i )
+    {
+        my $pgpassfile = $config->get_configvalue( $sect, 'pgpassfile', undef );
+        $outputtodir = 1;
+        my $idstring =
+          $port
+          ? sprintf( "--username=%s --host=%s --port=%d", $user, $host, $port )
+          : sprintf( "--username=%s --host=%s",           $user, $host );
+        $dumpcmd = sprintf(
+            "pg_dump --verbose --clean --create --no-password --format=d %s ",
+            $idstring );
+        $ENV{PGPASSFILE} = $pgpassfile
+          || File::Spec->catfile(
+            File::Basename::dirnamr( $config->get_configfile() ), 'pgpass' );
+        Msg->debug( "PGPASSFILE=", $ENV{PGPASSFILE} );
+        $dblistcmd = sprintf(
+'echo "SELECT datname FROM pg_database WHERE datistemplate = false" | psql --pset="tuples_only" --no-password %s',
+            $idstring );
+        unless (@databases) { @databases = &psqlgetdblist($dblistcmd); }
+    }
+    Msg->debug( "dblistcmd=", $dblistcmd );
+    Msg->debug( "dumpcmp=",   $dumpcmd );
+    Msg->debug( "(final) databases=", \@databases );
+    foreach my $dbname (@databases)
+    {
+        chomp $dbname;
+        my $databaseid =
+          sprintf( "%s_%s_%s_%s", $dbtype, $dbname, $choice, $timestamp->iso8601() );
+        my $logfile = File::Spec->catfile( $logdir, $databaseid . ".log" );
+        Msg->adddispatchers(
+            {
+                $databaseid,
+                [
+                    'Log::Dispatch::File',
+                    min_level => 'info',
+                    filename  => $logfile
+                ]
+            }
+        );
+        my $resourceid ="${dbtype}_$dbname"; 
+        my $lockfilename =
+          File::Spec->catfile( $lockdir, "$resourceid.pid" );
+        Msg->debug( 'lockfilename=', $lockfilename );
+        my $lockfile = File::Lock->new(
+            { resource => $resourceid, lockfilename => $lockfilename }
+        );
+        eval { $lockfile->lock(); };
+        unless (
+            Exception->eval_warn(
+                $@,
+                "Unable to take lock file for resource $sect. Backup skipped."
+            )
+          )
+        {
+       # The backup is made to an 'inprogress' place and then moved to the final
+       # 'completed' destination if it works.
+            my $tmpfile =
+              File::Spec->catfile( $dumpdir, $databaseid . ".inprogress" );
+            my $sqlfile =
+              File::Spec->catfile( $dumpdir, $databaseid . ".completed" );
+            Msg->info( '### START: BACKUP ',       $databaseid );
+            Msg->info( '### Temporary dump file ', $tmpfile );
+            Msg->info( '### Final dump file ',     $sqlfile );
+            if ($outputtodir)
+            {
+                File::Path::make_path($tmpfile);
+            }
+
+            my $cmd;
+            if ( $dbtype =~ /mysql/i )
+            {
+                $cmd = sprintf( "%s --result-file=%s %s",
+                    $dumpcmd, $tmpfile, $dbname );
+            } elsif ( $dbtype =~ /psql|postgres/i )
+            {
+                $cmd =
+                  sprintf( "%s --file=%s %s", $dumpcmd, $tmpfile, $dbname );
+            }
+            my $safecmd = &safecommand($cmd);
+            Msg->info( 'dump command = ', $safecmd );
+            my $out;
+            eval { $out = Exec->run($cmd); };
+            unless (
+                Exception->eval_warn(
+                    $@,
+                    sprintf(
+                        'Failed to dump section %s, database %s.',
+                        $sect, $dbname
+                    )
+                )
+              )
+            {
+                Msg->output(@$out);
+                rename( $tmpfile, $sqlfile );
+            }
+            Msg->info( '### END: BACKUP ', $databaseid );
+            $lockfile->unlock();
+            Msg->removedispatchers($databaseid);
+        }
+        Msg->info( '### END: BACKUP ', $logstring );
+    }
+}
+
+sub process_section
+{
+    # Process a uniquely identified database cluster/host.
+    my ( $config, $sect, $timestamp, @databases ) = @_;
+    my $rtn;
+    my $y = &is_yesortrue( $config->get_configvalue( $sect, 'ignore' ,0) );
+    if ( !$y )
+    {
+        my $dbtype = $config->get_configvalue( $sect, 'dbtype' );
+        my $choice = $config->get_configvalue( $sect, 'choice',$Defaultchoice );
+
+        my $sectionlogid = sprintf( "%s_%s_%s", $dbtype, $choice, $timestamp->iso8601() );
+        my $dumpdir = $config->get_configvalue( $sect, 'dumpdir', $ENV{PWD} );
+        my $lockdir = $config->get_configvalue( $sect, 'lockdir', $dumpdir );
+        my $logdir  = $config->get_configvalue( $sect, 'logdir',  $dumpdir );
+        Msg->debug( 'dumpdir=', $dumpdir );
+        Msg->debug( 'lockdir=', $lockdir );
+        Msg->debug( 'logdir=',  $logdir );
+        my $logfilename =
+          File::Spec->catfile( $logdir, $sectionlogid . ".log" );
+        Msg->adddispatchers(
+            {
+                $sectionlogid,
+                [
+                    'Log::Dispatch::File',
+                    min_level => 'info',
+                    filename  => $logfilename
+                ]
+            }
+        );
+        
+        # Resolve defaults and specifics into a single hash.
+        my $lockfilename = File::Spec->catfile( $lockdir, "$sect.pid" );
+
+        my $lockfile = File::Lock->new(
+            { resource => $sect, lockfilename => $lockfilename } );
+        eval { $lockfile->lock(); };
+        unless (
+            Exception->eval_warn(
+                $@,
+                "Unable to take lock file for resource $sect. Backup skipped."
+            )
+          )
+        {
+            
+            eval { &sqlbackup( $config, $sect, $timestamp, $choice, @databases ); };
+            Exception->eval_warn($@,'SQL Dump failed.');
+            $lockfile->unlock();
+        }
+        Msg->removedispatchers($sectionlogid);
+    }
+    return $rtn;
+}
+
+sub is_yesortrue
+{
+    my $s = shift;
+    return $s && $s =~ /^(y|yes|t|true|1)$/i;
+}
+
+# Name if this process used for the lock file.
+my $name = File::Basename::basename($0);
+
+# Now we can work out where the lock file should go, try to obtain it.
+my $dumpdir = $config->get_configvalue( $Defaultsection, 'dumpdir', $ENV{PWD} );
+my $lockdir = $config->get_configvalue( $Defaultsection, 'lockdir', $dumpdir );
+my $logdir  = $config->get_configvalue( $Defaultsection, 'logdir',  $dumpdir );
+
+Msg->debug( 'dumpdir=', $dumpdir );
+Msg->debug( 'lockdir=', $lockdir );
+Msg->debug( 'logdir=',  $logdir );
+my $lockfilename = File::Spec->catfile( $lockdir, "$name.pid" );
+
+my $lockfile =
+  File::Lock->new( { resource => $name, lockfilename => $lockfilename } );
+
+$lockfile->lock();
+Msg->debug("Lock taken " , $lockfile->make_identity());
+
+# Disconnect from the terminal
+# Redirect STDERR to STDOUT.
+open( STDIN, '</dev/null' )
+  or die('Unable to redirect STDIN to /dev/null.');
+open( STDERR, '>&STDOUT' )
+  or die('Unable to redirect STDERR to STDOUT.');
+select STDOUT;
+
+# Timestamps written to log output.
+
+my $timestamp = Timestamp->new();
+Msg->debug( 'Timestamp=', $timestamp->iso8601() );
+Msg->debug( [ opt => \%opt ] );
+my $sections = $config->get_configvalue( $Defaultsection, 'sections', [$config->get_config()->Sections()] );
+my @sections = @{ $sections} ;
+@sections = grep { $_ ne $Defaultsection } @sections;
+Msg->debug(\@sections);
+
+my @databases; # For future overriding of DB selection.
+
+Msg->debug( "sections=", \@sections );
+
+foreach my $sect (@sections)
+{
+    Msg->debug( 'BEGIN ',$sect,"\n" );
+    eval { &process_section( $config, $sect, $timestamp, @databases); };
+    Exception->eval_warn( $@, 'Failed to process section: ', $sect );
+    Msg->debug( 'END   ',$sect,"\n" );
+    
+}
+$lockfile->unlock();
+__END__
+
+=encoding UTF-8
+=pod
+=head1 NAME
+
+dbbackup - A simple Perl script for backing up databases.
+	
+=head1 SYNOPSIS (Version 1.0)
+
+	dbbackup [choice [section] [section] ...].
+
+=head1 DESCRIPTION
+
+B<dbbackup> is a simple script to backup databases. It relies on database tools such as B<pg_dump> and B<mysql> to do the backups.  This version (1.0) works with postgresql and mysql databases.
+
+The argument I<choice> is used to distinguish different types of backups (eg. daily, weekly etc).  The default value is I<daily>.  
+
+A configuration file dbbackup.conf is required.  It is searched for in /etc, the script directory and the users home directory. This can be redefined at the top of the script as necessary. The format of this file is given below.  Each configuration file section refers to a single database type and host. 
+
+By default all configuration file sections are processed (unless the ignore option is given).  Specific sections can be selected on the command line after the choice argument.
+
+Dumps are made to an intermediate location before being moved to the final location on successfull completion.  Mysql dumps are to file; postgres dumps use the more flexible directory format.
+
+=over 4
+
+=item Intermediate location: $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.inprogress
+
+=item Final location:        $backupdir/${sectionid}_${databasename}_${choice}_${timestamp}.completed 
+
+=back
+
+The script creates a hierarchy of lock files as it dumps each database.  One lockfile is for the script itself, one for each database configuration and one for each database dump.  This allows other programs to identify what backups are in progress and avoid conflicts.
+
+The script was deliberately written using the limited set of Perl modules available from a standard Perl install.  This makes it more portable across hosting services.
+
+=head2 The F<dbbackup.conf> configuration file
+
+=head3 File Format
+
+=over 4
+
+=item I<#> to the end of line 
+
+Are comments.  These are stripped and never processed.
+
+=item Blank lines
+
+Are ignored.
+
+=item C<${foo}> or C<$foo\W> 
+
+Variables.  The key=value values are processed for variable subtitution.  The replacement value is looked for using the key C<foo> in the current section, the default section or environment variable of the same name in that order. If no
+value is found the empty string is substituted.
+
+=item key1=value1   
+
+key1 with value1 in the current section.  By default values are scalars.
+
+=item key1=value2 
+
+A key repeated in a section turns the values into a list.
+
+=item identifier
+
+An identifier (no equals sign) starts a new section.  key=value pairs before the first section header go into the #default section.
+
+=item C<$confdir> 
+
+The key confdir is set to the directory this configuration file is found in.  It can therefore be used as a variable in the configuration file.
+
+=back 
+
+=head3 Recognized Key Values
+
+=over 4
+
+=item choice=string
+
+=item root=$HOME/tmp/backup
+
+Common root for the backup tree - where logs, output etc should go.
+
+=item lockdir=$root/lock
+
+Directory lock files will be created.
+
+=item logdir=$root/log
+
+Directory logfiles will be created.
+
+=item dumpdir=$root/dump
+
+Directory database dumps will be created.
+
+=item db=mysql|psql
+
+Identify the type of database a section refers to.
+
+=item ignore=y|yes|t|true|1
+
+Tell dbbackup to ignore this section.  Anything other than y, yes, t, true or 1
+is treated as false.  The default is false.
+
+=item host=mysql.example.com
+
+The database host to talk to.
+
+=item port=port number
+
+The port to talk to on the specified host.  The default
+port is assumed if non is given.
+
+=item user=superduperuser
+
+A database user (role) with necessary backup privileges.
+
+=item password=supersecretpassword B<[db=mysql only]>
+
+The users password.
+
+=item dbname=database1
+
+Specific databases to be backed up.  If non are given the
+database is queried for a list and all are backed up.
+
+Specify multiple times to specify a list of database names.
+
+=item pgpassfile=$confdir/pgpass  B<[db=psql only]>
+
+A suitable postgres pgpass file.
+
+=back
+
+=head3 Notes
+
+B<Yes> you can make variable substitution recurse and break things; but then you get to keep all of the pieces.
+
+Variable substitution is performed on the I<#default> section first and then on the remaining sections in alphabetical order.
+
+B<No> you cannot create section names with a #.  # to the end of line are stripped out as comments when the configuration file is read.  That makes such keys perfect for internal purposes.
+
+
+=head2 Mysql Specifics
+
+Mysql needs a username and password which must be given in the dbbackup.conf file.
+Please make sure the dbbackup.conf file has minimal permissions.
+
+
+=head2 Postgres Specifics
+
+Postgres does not accept passwords on the command line.  These must be
+provided in a separate, correctly permissioned I<pgpass> file.  By
+default this file is looked for in the same directory as the dbbackup.conf
+file.
+
+=head1 SECURITY
+
+Mysql needs a username and password to be given in the dbbackup.conf file. Please make sure the dbbackup.conf file has minimal permissions.
+
+B<dbbackup> creates files with predictable names.  If it is run with elevated privileges then this is a security hole.  You must protect
+against this by limiting the privileges of the directories where output (lock files, logs and backups) are created.
+
+=cut
