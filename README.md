@@ -13,9 +13,9 @@ The modules are:
 * Exec         - Wrap various ways of calling other code and convert problems into Exceptions.
 * Msg          - Logging interface built ontop of Log::Dispatch
 * File::Compression - Simple interface for bulk file compression and decompression.
-* File::Lock   - Lock files which can be used to protect contended resources in shared and clustered environements.
+* File::Lock   - Lock files which can be used to protect contended resources in shared and clustered environments.
 * File::Pid    - Specialised File::Lock used to indicate an instance of a process (eg. Daemons) is already running.
-* File::Serial - File backed persistent sequence of numbers which can be used in a shared and clustered environements.
+* File::Serial - File backed persistent sequence of numbers which can be used in a shared and clustered environments.
 * Timestamp    - Timestamps used to record time during processing.
 
 
